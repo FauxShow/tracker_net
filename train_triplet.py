@@ -10,27 +10,27 @@ from torch.utils.data import Dataset
 from torchvision import datasets
 from torchvision import transforms as T
 from torch.optim.lr_scheduler import StepLR
+from torch.nn import CosineSimilarity
 
 from siamese_dataloader import SiameseDataloader
-from networks import SiameseNetwork
+from networks import TripletNetwork
 
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
 
-    # we aren't using `TripletLoss` as the MNIST dataset is simple, so `BCELoss` can do the trick.
-    criterion = nn.BCELoss()
+    criterion = nn.TripletMarginLoss()
 
-    for batch_idx, (images_1, images_2, targets) in enumerate(train_loader):
-        images_1, images_2, targets = images_1.to(device), images_2.to(device), targets.to(device)
+    for batch_idx, (anchor, positive, negative) in enumerate(train_loader):
+        anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
         optimizer.zero_grad()
-        outputs = model(images_1, images_2).squeeze()
-        loss = criterion(outputs, targets)
+        outputs = model(anchor, positive, negative)
+        loss = criterion(*outputs)
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(images_1), len(train_loader.dataset),
+            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.8f}'.format(
+                epoch, batch_idx * len(anchor), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
             if args.dry_run:
                 break
@@ -41,25 +41,29 @@ def test(model, device, test_loader):
     test_loss = 0
     correct = 0
 
-    criterion = nn.BCELoss()
+    print("Running test batch")
+
+    criterion = nn.TripletMarginLoss()
+    cos = CosineSimilarity()
 
     with torch.no_grad():
-        for (images_1, images_2, targets) in test_loader:
-            images_1, images_2, targets = images_1.to(device), images_2.to(device), targets.to(device)
-            outputs = model(images_1, images_2).squeeze()
-            test_loss += criterion(outputs, targets).sum().item()  # sum up batch loss
-            pred = torch.where(outputs > 0.5, 1, 0)  # get the index of the max log-probability
-            correct += pred.eq(targets.view_as(pred)).sum().item()
+        for (anchor, positive, negative) in test_loader:
+            anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
+            outputs = model(anchor, positive, negative)
+            test_loss += criterion(*outputs).sum().item()
+            # calculate fixed-thresh accuracy based on cosine sim between embeddings
+            positive_cosine_sims = cos(outputs[0], outputs[1])
+            negative_cosine_sims = cos(outputs[0], outputs[2])
+            pos_pred = torch.where(positive_cosine_sims > 0.5, 1, 0)  
+            neg_pred = torch.where(negative_cosine_sims <= 0.5, 1, 0)  
+            correct += pos_pred.sum() + neg_pred.sum()
 
     test_loss /= len(test_loader.dataset)
+    accuracy = correct.item() / (len(test_loader.dataset) * 2) # *2 because we make 2 preds per sample (1pos 1neg)
 
-    # for the 1st epoch, the average loss is 0.0001 and the accuracy 97-98%
-    # using default settings. After completing the 10th epoch, the average
-    # loss is 0.0000 and the accuracy 99.5-100% using default settings.
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+    print(f"\nTest:\nAverage Loss: {round(test_loss,5)}\nAccuracy: {round(accuracy, 5)}")
 
+    return accuracy
 
 def main():
     # Training settings
@@ -111,23 +115,24 @@ def main():
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    train_dataset = SiameseDataloader(args.data_root, 'siamese', True, 128, 128, device)
-    test_dataset = SiameseDataloader(args.data_root, 'siamese', False, 128, 128, device)
+    train_dataset = SiameseDataloader(args.data_root, 'triplet', True, 128, 128, device)
+    test_dataset = SiameseDataloader(args.data_root, 'triplet', False, 128, 128, device)
     train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
 
-    model = SiameseNetwork().to(device)
+    model = TripletNetwork().to(device)
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
 
-    scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
+    best_model_acc = 0.0
+
+    scheduler = StepLR(optimizer, step_size=5, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
+        accuracy = test(model, device, test_loader)
         train(args, model, device, train_loader, optimizer, epoch)
-        test(model, device, test_loader)
+        if accuracy > best_model_acc:
+            best_model_acc = accuracy
+            torch.save(model.state_dict(), f"checkpoints/triplet_network_{round(accuracy, 5)}.pt")
         scheduler.step()
-
-    if args.save_model:
-        torch.save(model.state_dict(), "siamese_network.pt")
-
 
 if __name__ == '__main__':
     main()
