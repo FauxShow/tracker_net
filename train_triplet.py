@@ -10,22 +10,39 @@ from torch.utils.data import Dataset
 from torchvision import datasets
 from torchvision import transforms as T
 from torch.optim.lr_scheduler import StepLR
-from torch.nn import CosineSimilarity
+import matplotlib.pyplot as plt
+#from torch.nn import CosineSimilarity
 
 from siamese_dataloader import SiameseDataloader
 from networks import TripletNetwork
+from triplet_loss import TripletLoss # semihard triplet mining implementation
 
+def plot_distribution(pos, neg, epoch_num):
+    plt.hist(pos, 30, density=True)
+    plt.hist(neg, 30, density=True)
+    plt.savefig(f"plots/epoch_{epoch_num}.png")
+    plt.close()
 
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
 
-    criterion = nn.TripletMarginLoss()
+    triplet_margin_loss = nn.TripletMarginLoss(margin=0.2)
+    triplet_semihard_loss = TripletLoss(0.2, device)
 
-    for batch_idx, (anchor, positive, negative) in enumerate(train_loader):
-        anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
+    switch_to_semihard = 2 # epoch to switch to semihard triplet mining
+
+    for batch_idx, (anchor, positive, negative, labels) in enumerate(train_loader):
+        anchor, positive, negative, = anchor.to(device), positive.to(device), negative.to(device)
+        labels = labels.to(device)
+
         optimizer.zero_grad()
         outputs = model(anchor, positive, negative)
-        loss = criterion(*outputs)
+        if epoch < switch_to_semihard:
+            loss = triplet_margin_loss(*outputs)
+        else:
+            embeddings = torch.concat((outputs[0], outputs[1], outputs[2]))
+            labels = labels.reshape(-1)
+            loss = triplet_semihard_loss(embeddings, labels)
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
@@ -36,34 +53,36 @@ def train(args, model, device, train_loader, optimizer, epoch):
                 break
 
 
-def test(model, device, test_loader):
+def test(model, device, test_loader, epoch_num):
     model.eval()
     test_loss = 0
     correct = 0
 
     print("Running test batch")
 
-    criterion = nn.TripletMarginLoss()
-    cos = CosineSimilarity()
+    criterion = nn.TripletMarginLoss(margin=0.2)
+
+    pdist = nn.PairwiseDistance(p=2)
+    pos_distances = np.ndarray((0))
+    neg_distances = np.ndarray((0))
 
     with torch.no_grad():
-        for (anchor, positive, negative) in test_loader:
+        for (anchor, positive, negative, _) in test_loader:
             anchor, positive, negative = anchor.to(device), positive.to(device), negative.to(device)
             outputs = model(anchor, positive, negative)
             test_loss += criterion(*outputs).sum().item()
-            # calculate fixed-thresh accuracy based on cosine sim between embeddings
-            positive_cosine_sims = cos(outputs[0], outputs[1])
-            negative_cosine_sims = cos(outputs[0], outputs[2])
-            pos_pred = torch.where(positive_cosine_sims > 0.5, 1, 0)  
-            neg_pred = torch.where(negative_cosine_sims <= 0.5, 1, 0)  
-            correct += pos_pred.sum() + neg_pred.sum()
+            pos_distances = np.append(pos_distances, pdist(outputs[0], outputs[1]).cpu().numpy())
+            neg_distances = np.append(neg_distances, pdist(outputs[0], outputs[2]).cpu().numpy())
+
+    plot_distribution(pos_distances, neg_distances, epoch_num)
 
     test_loss /= len(test_loader.dataset)
-    accuracy = correct.item() / (len(test_loader.dataset) * 2) # *2 because we make 2 preds per sample (1pos 1neg)
+    #accuracy = correct.item() / (len(test_loader.dataset) * 2) # *2 because we make 2 preds per sample (1pos 1neg)
 
-    print(f"\nTest:\nAverage Loss: {round(test_loss,5)}\nAccuracy: {round(accuracy, 5)}")
+    print(f"\nTest:\nAverage Loss: {round(test_loss,5)}")
+    #print(f"\nTest:\nAverage Loss: {round(test_loss,5)}\nAccuracy: {round(accuracy, 5)}")
 
-    return accuracy
+    return test_loss
 
 def main():
     # Training settings
@@ -72,14 +91,16 @@ def main():
                         help='root directory of dataset')
     parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                         help='input batch size for training')
-    parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
-                        help='input batch size for testing (default: 1000)')
+    parser.add_argument('--test-batch-size', type=int, default=128, metavar='N',
+                        help='input batch size for testing')
     parser.add_argument('--epochs', type=int, default=14, metavar='N',
                         help='number of epochs to train (default: 14)')
     parser.add_argument('--lr', type=float, default=0.1, metavar='LR',
                         help='learning rate')
     parser.add_argument('--gamma', type=float, default=0.5, metavar='M',
                         help='Learning rate step gamma')
+    parser.add_argument('--load-ckpt', type=str, 
+                        help='Weights to initialise training')
     parser.add_argument('--no-cuda', action='store_true', default=False,
                         help='disables CUDA training')
     parser.add_argument('--no-mps', action='store_true', default=False,
@@ -115,21 +136,24 @@ def main():
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    train_dataset = SiameseDataloader(args.data_root, 'triplet', True, 128, 128, device)
-    test_dataset = SiameseDataloader(args.data_root, 'triplet', False, 128, 128, device)
+    train_dataset = SiameseDataloader(args.data_root, 'triplet', True, 1e5, 128, 128, device)
+    test_dataset = SiameseDataloader(args.data_root, 'triplet', False, 1e4, 128, 128, device)
     train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
 
     model = TripletNetwork().to(device)
-    optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
+    if args.load_ckpt:
+        print(f"Initialising weights from {args.load_ckpt}")
+        model.load_state_dict(torch.load(args.load_ckpt))
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    best_model_acc = 0.0
+    best_model_acc = 1e6    # high number as we now save best on lowest loss
 
     scheduler = StepLR(optimizer, step_size=5, gamma=args.gamma)
-    for epoch in range(1, args.epochs + 1):
-        accuracy = test(model, device, test_loader)
+    for epoch in range(0, args.epochs + 0):
         train(args, model, device, train_loader, optimizer, epoch)
-        if accuracy > best_model_acc:
+        accuracy = test(model, device, test_loader, epoch)
+        if accuracy < best_model_acc:
             best_model_acc = accuracy
             torch.save(model.state_dict(), f"checkpoints/triplet_network_{round(accuracy, 5)}.pt")
         scheduler.step()

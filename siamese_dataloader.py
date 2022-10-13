@@ -7,7 +7,7 @@ import torchvision.transforms as T
 from torchvision.io import read_image
 
 class SiameseDataloader(Dataset):
-    def __init__(self, data_root, mode, train, input_w, input_h, device):
+    def __init__(self, data_root, mode, train, dataset_size, input_w, input_h, device):
         """ Mode is either siamese (for pairs) or triple (for (anchor, pos, neg)) """
         
         super(SiameseDataloader, self).__init__()
@@ -19,7 +19,8 @@ class SiameseDataloader(Dataset):
             self.data_root = os.path.join(data_root, 'train/')
         else:
             self.data_root = os.path.join(data_root, 'test/')
-
+        
+        self.dataset_size = dataset_size
         self.input_w = input_w
         self.input_h = input_h
         self.device = device
@@ -38,7 +39,7 @@ class SiameseDataloader(Dataset):
         """ Dataset length is arbitrary as the dataset pairs or triplets are selected at random 
         Even with small datasets, the total number of pairs or triplets is exponential in the number
         of actual images, so thi would be too large for a single epoch """
-        return int(1e5)
+        return int(self.dataset_size)
 
 
     def __getitem__(self, index):
@@ -93,8 +94,10 @@ class SiameseDataloader(Dataset):
             anchor_im = self.transforms(anchor_im)
             positive_im = self.transforms(positive_im)
             negative_im = self.transforms(negative_im)
-            
-            return anchor_im, positive_im, negative_im
+           
+            class_labels = torch.tensor((selected_class_idx, selected_class_idx, diff_class_idx))
+
+            return anchor_im, positive_im, negative_im, class_labels
 
 
 if __name__ == "__main__":
