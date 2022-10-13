@@ -18,8 +18,8 @@ from networks import TripletNetwork
 from triplet_loss import TripletLoss # semihard triplet mining implementation
 
 def plot_distribution(pos, neg, epoch_num):
-    plt.hist(pos, 30, density=True)
-    plt.hist(neg, 30, density=True)
+    plt.hist(pos, 100, density=True)
+    plt.hist(neg, 100, density=True)
     plt.savefig(f"plots/epoch_{epoch_num}.png")
     plt.close()
 
@@ -29,7 +29,7 @@ def train(args, model, device, train_loader, optimizer, epoch):
     triplet_margin_loss = nn.TripletMarginLoss(margin=0.2)
     triplet_semihard_loss = TripletLoss(0.2, device)
 
-    switch_to_semihard = 2 # epoch to switch to semihard triplet mining
+    switch_to_semihard = 0 # epoch to switch to semihard triplet mining
 
     for batch_idx, (anchor, positive, negative, labels) in enumerate(train_loader):
         anchor, positive, negative, = anchor.to(device), positive.to(device), negative.to(device)
@@ -41,6 +41,7 @@ def train(args, model, device, train_loader, optimizer, epoch):
             loss = triplet_margin_loss(*outputs)
         else:
             embeddings = torch.concat((outputs[0], outputs[1], outputs[2]))
+            labels = labels.swapaxes(0, 1)
             labels = labels.reshape(-1)
             loss = triplet_semihard_loss(embeddings, labels)
         loss.backward()
