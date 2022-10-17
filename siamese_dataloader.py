@@ -19,6 +19,7 @@ class SiameseDataloader(Dataset):
             self.data_root = os.path.join(data_root, 'train/')
         else:
             self.data_root = os.path.join(data_root, 'test/')
+            torch.manual_seed(0)
         
         self.dataset_size = dataset_size
         self.input_w = input_w
@@ -27,7 +28,6 @@ class SiameseDataloader(Dataset):
 
         self.transforms = torch.nn.Sequential(
             T.Resize((input_w, input_h)),
-            T.RandomHorizontalFlip(p=0.5),
             T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         )
 

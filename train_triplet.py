@@ -17,6 +17,8 @@ from siamese_dataloader import SiameseDataloader
 from networks import TripletNetwork
 from triplet_loss import TripletLoss # semihard triplet mining implementation
 
+from benchmark import compute_metrics
+
 def plot_distribution(pos, neg, epoch_num):
     plt.hist(pos, 100, density=True)
     plt.hist(neg, 100, density=True)
@@ -78,12 +80,13 @@ def test(model, device, test_loader, epoch_num):
     plot_distribution(pos_distances, neg_distances, epoch_num)
 
     test_loss /= len(test_loader.dataset)
-    #accuracy = correct.item() / (len(test_loader.dataset) * 2) # *2 because we make 2 preds per sample (1pos 1neg)
+    TPRat1e_2, TPRat1e_3 = compute_metrics(pos_distances, neg_distances)
 
     print(f"\nTest:\nAverage Loss: {round(test_loss,5)}")
-    #print(f"\nTest:\nAverage Loss: {round(test_loss,5)}\nAccuracy: {round(accuracy, 5)}")
+    print(f"TPR@FPR1e-3: {TPRat1e_3}")
+    print(f"TPR@FPR1e-2: {TPRat1e_2}")
 
-    return test_loss
+    return test_loss, TPRat1e_2, TPRat1e_3
 
 def main():
     # Training settings
@@ -94,7 +97,7 @@ def main():
                         help='input batch size for training')
     parser.add_argument('--test-batch-size', type=int, default=128, metavar='N',
                         help='input batch size for testing')
-    parser.add_argument('--epochs', type=int, default=14, metavar='N',
+    parser.add_argument('--epochs', type=int, default=30, metavar='N',
                         help='number of epochs to train (default: 14)')
     parser.add_argument('--lr', type=float, default=0.1, metavar='LR',
                         help='learning rate')
@@ -110,7 +113,7 @@ def main():
                         help='quickly check a single pass')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--log-interval', type=int, default=10, metavar='N',
+    parser.add_argument('--log-interval', type=int, default=100, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=True,
                         help='For Saving the current Model')
@@ -132,7 +135,7 @@ def main():
     test_kwargs = {'batch_size': args.test_batch_size}
     if use_cuda:
         cuda_kwargs = {'num_workers': 4,
-                       'pin_memory': False,
+                       'pin_memory': True,
                        'shuffle': False}
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
@@ -148,15 +151,15 @@ def main():
         model.load_state_dict(torch.load(args.load_ckpt))
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    best_model_acc = 1e6    # high number as we now save best on lowest loss
+    best_model_acc = 0
 
     scheduler = StepLR(optimizer, step_size=5, gamma=args.gamma)
     for epoch in range(0, args.epochs + 0):
         train(args, model, device, train_loader, optimizer, epoch)
-        accuracy = test(model, device, test_loader, epoch)
-        if accuracy < best_model_acc:
-            best_model_acc = accuracy
-            torch.save(model.state_dict(), f"checkpoints/triplet_network_{round(accuracy, 5)}.pt")
+        loss, TPRat1e_2, TPRat1e_3 = test(model, device, test_loader, epoch)
+        if TPRat1e_2 > best_model_acc:
+            best_model_acc = TPRat1e_2
+            torch.save(model.state_dict(), f"checkpoints/triplet_network_{round(TPRat1e_2, 5)}_epoch{epoch}.pt")
         scheduler.step()
 
 if __name__ == '__main__':
