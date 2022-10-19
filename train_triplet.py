@@ -20,8 +20,8 @@ from triplet_loss import TripletLoss # semihard triplet mining implementation
 from benchmark import compute_metrics
 
 def plot_distribution(pos, neg, epoch_num):
-    plt.hist(pos, 100, density=True)
-    plt.hist(neg, 100, density=True)
+    plt.hist(pos, 100, density=True, alpha=0.5)
+    plt.hist(neg, 100, density=True, alpha=0.5)
     plt.savefig(f"plots/epoch_{epoch_num}.png")
     plt.close()
 
@@ -32,28 +32,38 @@ def train(args, model, device, train_loader, optimizer, epoch):
     triplet_semihard_loss = TripletLoss(0.2, device)
 
     switch_to_semihard = 0 # epoch to switch to semihard triplet mining
+    batch_multiplier = 32
+
+    count = 0
 
     for batch_idx, (anchor, positive, negative, labels) in enumerate(train_loader):
         anchor, positive, negative, = anchor.to(device), positive.to(device), negative.to(device)
         labels = labels.to(device)
 
-        optimizer.zero_grad()
+        if count == 0:
+            optimizer.step()
+            optimizer.zero_grad()
+            count = batch_multiplier
+        
         outputs = model(anchor, positive, negative)
+        
         if epoch < switch_to_semihard:
-            loss = triplet_margin_loss(*outputs)
+            loss = triplet_margin_loss(*outputs) / batch_multiplier
         else:
             embeddings = torch.concat((outputs[0], outputs[1], outputs[2]))
             labels = labels.swapaxes(0, 1)
             labels = labels.reshape(-1)
-            loss = triplet_semihard_loss(embeddings, labels)
+            loss = triplet_semihard_loss(embeddings, labels) / batch_multiplier
         loss.backward()
-        optimizer.step()
+
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.8f}'.format(
                 epoch, batch_idx * len(anchor), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
             if args.dry_run:
                 break
+
+        count -= 1
 
 
 def test(model, device, test_loader, epoch_num):
@@ -140,8 +150,8 @@ def main():
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    train_dataset = SiameseDataloader(args.data_root, 'triplet', True, 1e5, 128, 128, device)
-    test_dataset = SiameseDataloader(args.data_root, 'triplet', False, 1e4, 128, 128, device)
+    train_dataset = SiameseDataloader(args.data_root, 'triplet', True, 1e6, 128, 128, device)
+    test_dataset = SiameseDataloader(args.data_root, 'triplet', False, 1e5, 128, 128, device)
     train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
     test_loader = torch.utils.data.DataLoader(test_dataset, **test_kwargs)
 
@@ -154,7 +164,7 @@ def main():
     best_model_acc = 0
 
     scheduler = StepLR(optimizer, step_size=5, gamma=args.gamma)
-    for epoch in range(0, args.epochs + 0):
+    for epoch in range(0, args.epochs):
         train(args, model, device, train_loader, optimizer, epoch)
         loss, TPRat1e_2, TPRat1e_3 = test(model, device, test_loader, epoch)
         if TPRat1e_2 > best_model_acc:
